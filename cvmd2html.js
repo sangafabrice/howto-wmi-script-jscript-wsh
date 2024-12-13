@@ -1,6 +1,6 @@
 /**
  * @file Launches the shortcut target PowerShell script with the selected markdown as an argument.
- * @version 0.0.1.79
+ * @version 0.0.1.97
  */
 
 // #region: header of utils.js
@@ -19,8 +19,6 @@ var POPUP_NORMAL = 0;
 var FileSystemObject = new ActiveXObject('Scripting.FileSystemObject');
 /** @typedef */
 var WshShell = new ActiveXObject('WScript.Shell');
-/** @typedef */
-var Shell32 = new ActiveXObject('Shell.Application');
 
 var ScriptRoot = FileSystemObject.GetParentFolderName(WSH.ScriptFullName)
 
@@ -35,7 +33,7 @@ var Package = getPackage();
 var Param = getParameters();
 
 /** The application execution. */
-if (Param.Markdown && Package.IconLink.IsValid()) {
+if (Param.Markdown) {
   // #region: process.js
 
   // #region: Process type definition
@@ -79,7 +77,7 @@ if (Param.Markdown && Package.IconLink.IsValid()) {
 
     /** Wait for the process exit. */
     Process.prototype.WaitForExit = function () {
-      var moniker = 'winmgmts:Win32_Process.Handle=' + this.Id;
+      var moniker = 'winmgmts:Win32_Process=' + this.Id;
       try {
         var processName;
         do {
@@ -162,10 +160,12 @@ if (Param.Markdown && Package.IconLink.IsValid()) {
   // #endregion
 
   /** @constant */
-  var CMD_LINE_FORMAT = 'C:\\Windows\\System32\\cmd.exe /d /c ""{0}" "{1}" 2> "{2}""';
-  var startInfo = new ProcessStartup(format(CMD_LINE_FORMAT, Package.IconLink.Path, Param.Markdown, ErrorLog.Path));
+  var CMD_LINE_FORMAT = 'C:\\Windows\\System32\\cmd.exe /d /c ""{0}" 2> "{1}""';
+  Package.IconLink.Create(Param.Markdown);
+  var startInfo = new ProcessStartup(format(CMD_LINE_FORMAT, Package.IconLink.Path, ErrorLog.Path));
   startInfo.WindowStyle = WINDOW_STYLE_HIDDEN;
   Process.Start(startInfo).WaitForExit();
+  Package.IconLink.Delete();
   with (ErrorLog) {
     Read();
     Delete();
@@ -244,7 +244,6 @@ if (Param.Set ^ Param.Unset) {
   var StdRegProv = GetObject('winmgmts:StdRegProv');
 
   if (Param.Set) {
-    Package.IconLink.Create();
     Setup.Set();
     if (Param.NoIcon) {
       Setup.RemoveIcon();
@@ -253,7 +252,6 @@ if (Param.Set ^ Param.Unset) {
     }
   } else if (Param.Unset) {
     Setup.Unset();
-    Package.IconLink.Delete();
   }
 
   StdRegProv = null;
@@ -299,13 +297,17 @@ function deleteFile(filePath) {
  * @param {number} [popupButtons = BUTTONS_OKONLY] are the buttons of the message box.
  */
 function popup(messageText, popupType, popupButtons) {
+  /** @constant */
+  var WAIT_ON_RETURN = true;
   if (!popupType) {
     popupType = POPUP_NORMAL;
   }
   if (!popupButtons) {
     popupButtons = BUTTONS_OKONLY;
   }
-  Shell32.ShellExecute(Package.MessageBoxLinkPath, format('""""{0}"""" {1} {2}', messageText.replace(/"/g, "'"), popupButtons, popupType), null, null, WINDOW_STYLE_HIDDEN);
+  Package.MessageBoxLink.Create();
+  WshShell.Run(format('"{0}" "{1}" {2} {3}', Package.MessageBoxLink.Path, messageText.replace(/"/g, "'"), popupButtons, popupType), WINDOW_STYLE_HIDDEN, WAIT_ON_RETURN);
+  Package.MessageBoxLink.Delete();
 }
 
 /**
@@ -324,7 +326,6 @@ function format(formatStr, args) {
 
 /** Destroy the COM objects. */
 function dispose() {
-  Shell32 = null;
   WshShell = null;
   FileSystemObject = null;
 }
@@ -354,81 +355,62 @@ function getPackage() {
   var pwshExePath = WshShell.RegRead(POWERSHELL_SUBKEY);
   /** The shortcut target powershell script path. */
   var pwshScriptPath = FileSystemObject.BuildPath(resourcePath, 'cvmd2html.ps1');
-  var msgBoxLinkPath = FileSystemObject.BuildPath(ScriptRoot, 'MsgBox.lnk');
+  var messageBoxScriptPath = FileSystemObject.BuildPath(resourcePath, 'messageBox.ps1');
   var menuIconPath = FileSystemObject.BuildPath(resourcePath, 'menu.ico');
 
-  /** The icon link parent directory name. */
-  var iconLinkDirName = WshShell.SpecialFolders('StartMenu');
-  /** The icon link name. */
-  var iconLinkName = 'cvmd2html.lnk';
+  /** @constructor @abstract */
+  function ShortcutLink() {
+    /** The shortcut link path. */
+    this.Path = generateRandomPath('.lnk');
+    /** Abstract method for creating a shortcut link. */
+    this.Create = function () { };
+  }
+
+  /** Delete the custom icon link file. */
+  ShortcutLink.prototype.Delete = function() {
+    deleteFile(this.Path);
+  }
 
   /**
-   * Store the partial "arguments" property string of the custom icon link.
-   * The command is partial because it does not include the markdown file path string.
-   * The markdown file path string will be input when calling the shortcut link.
+   * Factory method for creating a ShortcutLink.
+   * @param {Function} func
+   * @returns {ShortcutLink}
    */
-  var iconLinkArguments = format('-ep Bypass -nop -w Hidden -f "{0}" -Markdown', pwshScriptPath);
+  var createShortcutLink = function (func) {
+    var link = new ShortcutLink();
+    link.Create = func;
+    return link;
+  }
 
   /**
-   * Get the custom icon link.
-   * @returns {object} the link object.
+   * Set the Create link method.
+   * @param {string} linkArguments
+   * @returns {function(): void}
    */
-  var GetLink = function() {
-    var folderItem = Shell32.NameSpace(iconLinkDirName);
-    var fileItem = folderItem.ParseName(iconLinkName);
-    var link = fileItem.GetLink;
-    try {
-      return link;
-    } finally {
+  var createLinkFunction = function(linkArguments) {
+    return function() {
+      var link = WshShell.CreateShortcut(this.Path);
+      link.TargetPath = pwshExePath;
+      link.Arguments = linkArguments;
+      link.IconLocation = menuIconPath;
+      link.Save();
       link = null;
-      fileItem = null;
-      folderItem = null;
     }
   }
 
   return {
     /** The shortcut menu icon path. */
     MenuIconPath: menuIconPath,
-    /** The message box link path. */
-    MessageBoxLinkPath: msgBoxLinkPath,
 
     /** Represents an adapted link object. */
-    IconLink: {
-      /** The icon link path. */
-      Path: FileSystemObject.BuildPath(iconLinkDirName, iconLinkName),
-
-      /** Create the custom icon link file. */
-      Create: function () {
-        var txtFile = FileSystemObject.CreateTextFile(this.Path);
-        txtFile.Close();
-        txtFile = null;
-        var link = GetLink();
-        link.Path = pwshExePath;
-        link.Arguments = iconLinkArguments;
-        link.SetIconLocation(menuIconPath, 0);
-        link.Save();
-        link = null;
-      },
-
-      /** Delete the custom icon link file. */
-      Delete: function () {
-        deleteFile(this.Path);
-      },
-
-      /**
-       * Validate the link properties.
-       * @returns {boolean} true if the link properties are as expected, false otherwise.
-       */
-      IsValid: function () {
-        var linkItem = GetLink();
-        var targetCommand = '{0} {1}';
-        try {
-          return format(targetCommand, linkItem.Path, linkItem.Arguments).toLowerCase() == format(targetCommand, pwshExePath, iconLinkArguments).toLowerCase();
-        } finally {
-          linkItem = null;
-        }
+    IconLink: createShortcutLink(
+      function (markdownPath) {
+        createLinkFunction(format('-ep Bypass -nop -w Hidden -f "{0}" -Markdown "{1}"', pwshScriptPath, markdownPath)).call(this);
       }
-    }
+    ),
+
+    /** Represents an adapted link object. */
+    MessageBoxLink: createShortcutLink(createLinkFunction(format('-f "{0}"', messageBoxScriptPath)))
   }
 }
 
