@@ -1,6 +1,6 @@
 /**
  * @file Launches the shortcut target PowerShell script with the selected markdown as an argument.
- * @version 0.0.1.0
+ * @version 0.0.1.79
  */
 
 // #region: header of utils.js
@@ -11,6 +11,8 @@ var WINDOW_STYLE_HIDDEN = 0;
 /** @constant */
 var BUTTONS_OKONLY = 0;
 /** @constant */
+var POPUP_ERROR = 16;
+/** @constant */
 var POPUP_NORMAL = 0;
 
 /** @typedef */
@@ -19,8 +21,6 @@ var FileSystemObject = new ActiveXObject('Scripting.FileSystemObject');
 var WshShell = new ActiveXObject('WScript.Shell');
 /** @typedef */
 var Shell32 = new ActiveXObject('Shell.Application');
-/** @typedef */
-var StdRegProv = GetObject('winmgmts:StdRegProv');
 
 var ScriptRoot = FileSystemObject.GetParentFolderName(WSH.ScriptFullName)
 
@@ -41,24 +41,53 @@ if (Param.Markdown && Package.IconLink.IsValid()) {
   // #region: Process type definition
 
   var Process = (function() {
-    /** @constructor */
-    function Process() { }
+    /**
+     * @constructor
+     * @param {number} processId the process identifier.
+     */
+    function Process(processId) {
+      this.Id = processId;
+    }
 
     /**
      * Start a specified program with its arguments.
      * @param {ProcessStartup} startInfo the process startup information.
-     * @returns {number} the process creation status.
+     * @returns {Process} the process identifier.
      */
     Process.Start = function (startInfo) {
       /** @typedef */
       var Win32_Process = GetObject('winmgmts:Win32_Process');
+      var createMethod = Win32_Process.Methods_('Create');
+      var createMethodParams = createMethod.InParameters;
       startInfo.StartupInfo.ShowWindow = startInfo.WindowStyle;
+      var inParams = createMethodParams.SpawnInstance_();
+      inParams.CommandLine = startInfo.CommandLine;
+      inParams.ProcessStartupInformation = startInfo.StartupInfo;
+      var outParams = Win32_Process.ExecMethod_(createMethod.Name, inParams);
       try {
-        return Win32_Process.Create(startInfo.CommandLine, null, startInfo.StartupInfo);
+        return new Process(outParams.ProcessId);
       } finally {
+        outParams = null;
+        inParams.ProcessStartupInformation = null;
+        inParams = null;
+        createMethodParams = null;
+        createMethod = null;
         Win32_Process = null;
         startInfo = null;
       }
+    }
+
+    /** Wait for the process exit. */
+    Process.prototype.WaitForExit = function () {
+      var moniker = 'winmgmts:Win32_Process.Handle=' + this.Id;
+      try {
+        var processName;
+        do {
+          var cmdProcess = GetObject(moniker);
+          processName = cmdProcess.Name;
+          cmdProcess = null;
+        } while (processName == 'cmd.exe');
+      } catch (e) { }
     }
 
     return Process;
@@ -98,11 +127,49 @@ if (Param.Markdown && Package.IconLink.IsValid()) {
 
   // #endregion
 
+  // #region: errorLog.js
+  // Manage the error log file and content.
+
+  /** @typedef */
+  var ErrorLog = {
+    /** The error log file path. */
+    Path: generateRandomPath('.log'),
+
+    /** Display the content of the error log file in a message box if it is not empty. */
+    Read: function () {
+      /** @constant */
+      var FOR_READING = 1;
+      try {
+        var txtStream = FileSystemObject.OpenTextFile(this.Path, FOR_READING);
+        // Read the error message and remove the ANSI escaped character for red coloring.
+        var errorMessage = txtStream.ReadAll().replace(/(\x1B\[31;1m)|(\x1B\[0m)/g, '');
+        if (errorMessage.length) {
+          popup(errorMessage, POPUP_ERROR);
+        }
+      } catch (e) { }
+      if (txtStream) {
+        txtStream.Close();
+        txtStream = null;
+      }
+    },
+
+    /** Delete the error log file. */
+    Delete: function () {
+      deleteFile(this.Path)
+    }
+  }
+
+  // #endregion
+
   /** @constant */
-  var CMD_LINE_FORMAT = 'C:\\Windows\\System32\\cmd.exe /d /c ""{0}" "{1}""';
-  var startInfo = new ProcessStartup(format(CMD_LINE_FORMAT, Package.IconLink.Path, Param.Markdown));
+  var CMD_LINE_FORMAT = 'C:\\Windows\\System32\\cmd.exe /d /c ""{0}" "{1}" 2> "{2}""';
+  var startInfo = new ProcessStartup(format(CMD_LINE_FORMAT, Package.IconLink.Path, Param.Markdown, ErrorLog.Path));
   startInfo.WindowStyle = WINDOW_STYLE_HIDDEN;
-  Process.Start(startInfo);
+  Process.Start(startInfo).WaitForExit();
+  with (ErrorLog) {
+    Read();
+    Delete();
+  }
   startInfo.Dispose();
   quit(0);
 }
@@ -173,6 +240,9 @@ if (Param.Set ^ Param.Unset) {
 
   // #endregion
 
+  /** @typedef */
+  var StdRegProv = GetObject('winmgmts:StdRegProv');
+
   if (Param.Set) {
     Package.IconLink.Create();
     Setup.Set();
@@ -185,6 +255,9 @@ if (Param.Set ^ Param.Unset) {
     Setup.Unset();
     Package.IconLink.Delete();
   }
+
+  StdRegProv = null;
+
   quit(0);
 }
 
@@ -194,6 +267,20 @@ quit(1);
 
 // #region: utils.js
 // Utility functions.
+
+/**
+ * Generate a random file path.
+ * @param {string} extension is the file extension.
+ * @returns {string} a random file path.
+ */
+function generateRandomPath(extension) {
+  var typeLib = new ActiveXObject('Scriptlet.TypeLib');
+  try {
+    return FileSystemObject.BuildPath(WshShell.ExpandEnvironmentStrings('%TEMP%'), typeLib.Guid.substr(1, 36).toLowerCase() + '.tmp' + extension);
+  } finally {
+    typeLib = null;
+  }
+}
 
 /**
  * Delete the specified file.
@@ -218,7 +305,7 @@ function popup(messageText, popupType, popupButtons) {
   if (!popupButtons) {
     popupButtons = BUTTONS_OKONLY;
   }
-  Shell32.ShellExecute(Package.MessageBoxLinkPath, format('""""{0}"""" {1} {2}', messageText.replace(/"/g, "'"), popupButtons, popupType), null, 'open', WINDOW_STYLE_HIDDEN);
+  Shell32.ShellExecute(Package.MessageBoxLinkPath, format('""""{0}"""" {1} {2}', messageText.replace(/"/g, "'"), popupButtons, popupType), null, null, WINDOW_STYLE_HIDDEN);
 }
 
 /**
@@ -237,7 +324,6 @@ function format(formatStr, args) {
 
 /** Destroy the COM objects. */
 function dispose() {
-  StdRegProv = null;
   Shell32 = null;
   WshShell = null;
   FileSystemObject = null;
@@ -260,28 +346,12 @@ function quit(exitCode) {
 /** Get the package type. */
 function getPackage() {
   /** @constant */
-  var POWERSHELL_SUBKEY = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe';
+  var POWERSHELL_SUBKEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe\\';
   /** The project resources directory path. */
   var resourcePath = FileSystemObject.BuildPath(ScriptRoot, 'rsc');
 
   /** The powershell core runtime path. */
-  var pwshExePath = (function() {
-    var stdRegProvMethods = StdRegProv.Methods_;
-    var getStringValueMethod = stdRegProvMethods('GetStringValue');
-    var getStringValueMethodParams = getStringValueMethod.InParameters;
-    var inParams = getStringValueMethodParams.SpawnInstance_();
-    inParams.sSubKeyName = POWERSHELL_SUBKEY;
-    var outParams = StdRegProv.ExecMethod_(getStringValueMethod.Name, inParams);
-    try {
-      return outParams.sValue;
-    } finally {
-      outParams = null;
-      inParams = null;
-      getStringValueMethodParams = null;
-      getStringValueMethod = null;
-      stdRegProvMethods = null;
-    }
-  })();
+  var pwshExePath = WshShell.RegRead(POWERSHELL_SUBKEY);
   /** The shortcut target powershell script path. */
   var pwshScriptPath = FileSystemObject.BuildPath(resourcePath, 'cvmd2html.ps1');
   var msgBoxLinkPath = FileSystemObject.BuildPath(ScriptRoot, 'MsgBox.lnk');
@@ -291,6 +361,30 @@ function getPackage() {
   var iconLinkDirName = WshShell.SpecialFolders('StartMenu');
   /** The icon link name. */
   var iconLinkName = 'cvmd2html.lnk';
+
+  /**
+   * Store the partial "arguments" property string of the custom icon link.
+   * The command is partial because it does not include the markdown file path string.
+   * The markdown file path string will be input when calling the shortcut link.
+   */
+  var iconLinkArguments = format('-ep Bypass -nop -w Hidden -f "{0}" -Markdown', pwshScriptPath);
+
+  /**
+   * Get the custom icon link.
+   * @returns {object} the link object.
+   */
+  var GetLink = function() {
+    var folderItem = Shell32.NameSpace(iconLinkDirName);
+    var fileItem = folderItem.ParseName(iconLinkName);
+    var link = fileItem.GetLink;
+    try {
+      return link;
+    } finally {
+      link = null;
+      fileItem = null;
+      folderItem = null;
+    }
+  }
 
   return {
     /** The shortcut menu icon path. */
@@ -308,16 +402,12 @@ function getPackage() {
         var txtFile = FileSystemObject.CreateTextFile(this.Path);
         txtFile.Close();
         txtFile = null;
-        var folderItem = Shell32.NameSpace(iconLinkDirName);
-        var fileItem = folderItem.ParseName(iconLinkName);
-        var link = fileItem.GetLink;
+        var link = GetLink();
         link.Path = pwshExePath;
-        link.Arguments = format('-ep Bypass -nop -w Hidden -f "{0}" -Markdown', pwshScriptPath);
+        link.Arguments = iconLinkArguments;
         link.SetIconLocation(menuIconPath, 0);
         link.Save();
         link = null;
-        fileItem = null;
-        folderItem = null;
       },
 
       /** Delete the custom icon link file. */
@@ -330,26 +420,12 @@ function getPackage() {
        * @returns {boolean} true if the link properties are as expected, false otherwise.
        */
       IsValid: function () {
-        var linkItem;
-        /** @typedef */
-        var Win32_ShortcutFile = GetObject('winmgmts:Win32_ShortcutFile');
-        var allShorcutFiles = Win32_ShortcutFile.Instances_();
-        var linkEnumerator = new Enumerator(allShorcutFiles);
-        var minPwshExePath = pwshExePath.toLowerCase();
-        var minIconLinkPath = this.Path.toLowerCase();
+        var linkItem = GetLink();
+        var targetCommand = '{0} {1}';
         try {
-          while (!linkEnumerator.atEnd()) {
-            if ((linkItem = linkEnumerator.item()).Name.toLowerCase() == minIconLinkPath) {
-              return linkItem.Target.toLowerCase() == minPwshExePath;
-            }
-            linkEnumerator.moveNext()
-          }
-          return false;
+          return format(targetCommand, linkItem.Path, linkItem.Arguments).toLowerCase() == format(targetCommand, pwshExePath, iconLinkArguments).toLowerCase();
         } finally {
           linkItem = null;
-          linkEnumerator = null;
-          allShorcutFiles = null;
-          Win32_ShortcutFile = null;
         }
       }
     }
@@ -394,6 +470,9 @@ function getParameters() {
     param = { Unset: WshNamed.Exists('Unset') };
     if (param.Unset && WshNamed('Unset') == undefined) {
       return param;
+    }
+    return {
+      Markdown: WshArguments(0)
     }
   } else if (paramCount == 0) {
     return {
