@@ -1,6 +1,6 @@
 /**
  * @file Launches the shortcut target PowerShell script with the selected markdown as an argument.
- * @version 0.0.1.97
+ * @version 0.0.1.109
  */
 
 // #region: header of utils.js
@@ -76,16 +76,28 @@ if (Param.Markdown) {
     }
 
     /** Wait for the process exit. */
-    Process.prototype.WaitForExit = function () {
-      var moniker = 'winmgmts:Win32_Process=' + this.Id;
-      try {
-        var processName;
-        do {
-          var cmdProcess = GetObject(moniker);
-          processName = cmdProcess.Name;
-          cmdProcess = null;
-        } while (processName == 'cmd.exe');
-      } catch (e) { }
+    Process.prototype.WaitForChildExit = function () {
+      // Select the process whose parent is the intermediate process used for executing the link.
+      var wqlQuery = 'SELECT * FROM Win32_Process WHERE Name="pwsh.exe" AND ParentProcessId=' + this.Id;
+      /** @typedef */
+      var SWbemServices = GetObject('winmgmts:');
+      var hasChildProcess = function() {
+        var singleProcessSet = SWbemServices.ExecQuery(wqlQuery);
+        var processEnumerator = new Enumerator(singleProcessSet);
+        var pwshProcess = processEnumerator.item();
+        try {
+          return pwshProcess != null;
+        } finally {
+          pwshProcess = null;
+          processEnumerator = null;
+          singleProcessSet = null;
+        }
+      }
+      // Wait for the process to start.
+      while (!hasChildProcess());
+      // Wait for the process to exit.
+      while (hasChildProcess());
+      SWbemServices = null;
     }
 
     return Process;
@@ -164,7 +176,7 @@ if (Param.Markdown) {
   Package.IconLink.Create(Param.Markdown);
   var startInfo = new ProcessStartup(format(CMD_LINE_FORMAT, Package.IconLink.Path, ErrorLog.Path));
   startInfo.WindowStyle = WINDOW_STYLE_HIDDEN;
-  Process.Start(startInfo).WaitForExit();
+  Process.Start(startInfo).WaitForChildExit();
   Package.IconLink.Delete();
   with (ErrorLog) {
     Read();
