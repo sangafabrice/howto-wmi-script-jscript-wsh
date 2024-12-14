@@ -1,6 +1,6 @@
 /**
  * @file Launches the shortcut target PowerShell script with the selected markdown as an argument.
- * @version 0.0.1.120
+ * @version 0.0.1.133
  */
 
 // #region: header of utils.js
@@ -19,6 +19,10 @@ var POPUP_NORMAL = 0;
 var FileSystemObject = new ActiveXObject('Scripting.FileSystemObject');
 /** @typedef */
 var WshShell = new ActiveXObject('WScript.Shell');
+/** @typedef */
+var SWbemLocator = new ActiveXObject('WbemScripting.SWbemLocator');
+/** @typedef */
+var SWbemServices = SWbemLocator.ConnectServer();
 
 var ScriptRoot = FileSystemObject.GetParentFolderName(WSH.ScriptFullName)
 
@@ -34,6 +38,16 @@ var Param = getParameters();
 
 /** The application execution. */
 if (Param.Markdown) {
+  var sink = WSH.CreateObject('WbemScripting.SWbemSink', 'process_');
+
+  /** Expected to be called when the child process exits. */
+  var process_OnObjectReady = function (wbemObject, asyncContext) {
+    wbemObject = null;
+    asyncContext = null;
+    sink.Cancel();
+    sink = null;
+  }
+
   // #region: process.js
 
   // #region: Process type definition
@@ -54,7 +68,7 @@ if (Param.Markdown) {
      */
     Process.Start = function (startInfo) {
       /** @typedef */
-      var Win32_Process = GetObject('winmgmts:Win32_Process');
+      var Win32_Process = SWbemServices.Get('Win32_Process');
       var createMethod = Win32_Process.Methods_('Create');
       var createMethodParams = createMethod.InParameters;
       startInfo.StartupInfo.ShowWindow = startInfo.WindowStyle;
@@ -80,13 +94,10 @@ if (Param.Markdown) {
       // Select the process whose parent is the intermediate process used for executing the link.
       var wqlQuery = 'SELECT * FROM __InstanceDeletionEvent WITHIN 0.1 WHERE TargetInstance ISA "Win32_Process" AND TargetInstance.Name="pwsh.exe" AND TargetInstance.ParentProcessId=' + this.Id;
       // Wait for the process to exit.
-      /** @typedef */
-      var SWbemServices = GetObject('winmgmts:');
-      var watcher = SWbemServices.ExecNotificationQuery(wqlQuery);
-      var pwshProcess = watcher.NextEvent();
-      pwshProcess = null;
-      watcher = null;
-      SWbemServices = null;
+      SWbemServices.ExecNotificationQueryAsync(sink, wqlQuery);
+      while (sink) {
+        WSH.Sleep(1);
+      }
     }
 
     return Process;
@@ -105,7 +116,7 @@ if (Param.Markdown) {
      * @param {string} commandLine the command line to execute.
      */
     function ProcessStartup(commandLine) {
-      Win32_ProcessStartup = GetObject('winmgmts:Win32_ProcessStartup');
+      Win32_ProcessStartup = SWbemServices.Get('Win32_ProcessStartup');
       /** The Win32_ProcessStartup instance. */
       this.StartupInfo = Win32_ProcessStartup.SpawnInstance_();
       /** The window style of the starting process. */
@@ -242,7 +253,7 @@ if (Param.Set ^ Param.Unset) {
   // #endregion
 
   /** @typedef */
-  var StdRegProv = GetObject('winmgmts:StdRegProv');
+  var StdRegProv = SWbemServices.Get('StdRegProv');
 
   if (Param.Set) {
     Setup.Set();
@@ -327,6 +338,8 @@ function format(formatStr, args) {
 
 /** Destroy the COM objects. */
 function dispose() {
+  SWbemServices = null;
+  SWbemLocator = null;
   WshShell = null;
   FileSystemObject = null;
 }
