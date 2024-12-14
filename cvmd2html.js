@@ -1,6 +1,6 @@
 /**
  * @file Launches the shortcut target PowerShell script with the selected markdown as an argument.
- * @version 0.0.1.109
+ * @version 0.0.1.120
  */
 
 // #region: header of utils.js
@@ -78,25 +78,14 @@ if (Param.Markdown) {
     /** Wait for the process exit. */
     Process.prototype.WaitForChildExit = function () {
       // Select the process whose parent is the intermediate process used for executing the link.
-      var wqlQuery = 'SELECT * FROM Win32_Process WHERE Name="pwsh.exe" AND ParentProcessId=' + this.Id;
+      var wqlQuery = 'SELECT * FROM __InstanceDeletionEvent WITHIN 0.1 WHERE TargetInstance ISA "Win32_Process" AND TargetInstance.Name="pwsh.exe" AND TargetInstance.ParentProcessId=' + this.Id;
+      // Wait for the process to exit.
       /** @typedef */
       var SWbemServices = GetObject('winmgmts:');
-      var hasChildProcess = function() {
-        var singleProcessSet = SWbemServices.ExecQuery(wqlQuery);
-        var processEnumerator = new Enumerator(singleProcessSet);
-        var pwshProcess = processEnumerator.item();
-        try {
-          return pwshProcess != null;
-        } finally {
-          pwshProcess = null;
-          processEnumerator = null;
-          singleProcessSet = null;
-        }
-      }
-      // Wait for the process to start.
-      while (!hasChildProcess());
-      // Wait for the process to exit.
-      while (hasChildProcess());
+      var watcher = SWbemServices.ExecNotificationQuery(wqlQuery);
+      var pwshProcess = watcher.NextEvent();
+      pwshProcess = null;
+      watcher = null;
       SWbemServices = null;
     }
 
