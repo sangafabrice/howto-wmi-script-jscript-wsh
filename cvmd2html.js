@@ -1,15 +1,15 @@
 /**
  * @file Launches the shortcut target PowerShell script with the selected markdown as an argument.
- * @version 0.0.1.0
+ * @version 0.0.1.69
  */
 
 // #region: header of utils.js
 // Constants and variables.
 
 /** @constant */
-var WINDOW_STYLE_HIDDEN = 0;
-/** @constant */
 var BUTTONS_OKONLY = 0;
+/** @constant */
+var POPUP_ERROR = 16;
 /** @constant */
 var POPUP_NORMAL = 0;
 
@@ -17,10 +17,6 @@ var POPUP_NORMAL = 0;
 var FileSystemObject = new ActiveXObject('Scripting.FileSystemObject');
 /** @typedef */
 var WshShell = new ActiveXObject('WScript.Shell');
-/** @typedef */
-var Shell32 = new ActiveXObject('Shell.Application');
-/** @typedef */
-var StdRegProv = GetObject('winmgmts:StdRegProv');
 
 var ScriptRoot = FileSystemObject.GetParentFolderName(WSH.ScriptFullName)
 
@@ -36,74 +32,11 @@ var Param = getParameters();
 
 /** The application execution. */
 if (Param.Markdown && Package.IconLink.IsValid()) {
-  // #region: process.js
-
-  // #region: Process type definition
-
-  var Process = (function() {
-    /** @constructor */
-    function Process() { }
-
-    /**
-     * Start a specified program with its arguments.
-     * @param {ProcessStartup} startInfo the process startup information.
-     * @returns {number} the process creation status.
-     */
-    Process.Start = function (startInfo) {
-      /** @typedef */
-      var Win32_Process = GetObject('winmgmts:Win32_Process');
-      startInfo.StartupInfo.ShowWindow = startInfo.WindowStyle;
-      try {
-        return Win32_Process.Create(startInfo.CommandLine, null, startInfo.StartupInfo);
-      } finally {
-        Win32_Process = null;
-        startInfo = null;
-      }
-    }
-
-    return Process;
-  })();
-
-  // #endregion
-
-  // #region: ProcessStartup type definition
-
-  var ProcessStartup = (function() {
-    /** @typedef */
-    var Win32_ProcessStartup = null;
-
-    /**
-     * @constructor
-     * @param {string} commandLine the command line to execute.
-     */
-    function ProcessStartup(commandLine) {
-      Win32_ProcessStartup = GetObject('winmgmts:Win32_ProcessStartup');
-      /** The Win32_ProcessStartup instance. */
-      this.StartupInfo = Win32_ProcessStartup.SpawnInstance_();
-      /** The window style of the starting process. */
-      this.WindowStyle = this.StartupInfo.ShowWindow;
-      /** The command line to execute. */
-      this.CommandLine = commandLine;
-    }
-
-    ProcessStartup.prototype.Dispose = function() {
-      this.StartupInfo = null;
-      Win32_ProcessStartup = null;
-    }
-
-    return ProcessStartup;
-  })();
-
-  // #endregion
-
-  // #endregion
-
   /** @constant */
-  var CMD_LINE_FORMAT = 'C:\\Windows\\System32\\cmd.exe /d /c ""{0}" "{1}""';
-  var startInfo = new ProcessStartup(format(CMD_LINE_FORMAT, Package.IconLink.Path, Param.Markdown));
-  startInfo.WindowStyle = WINDOW_STYLE_HIDDEN;
-  Process.Start(startInfo);
-  startInfo.Dispose();
+  var CMD_LINE_FORMAT = '"{0}" "{1}"';
+  if (run(format(CMD_LINE_FORMAT, Package.IconLink.Path, Param.Markdown))) {
+    popup('An unhandled error has occurred.', POPUP_ERROR);
+  }
   quit(0);
 }
 
@@ -114,18 +47,19 @@ if (Param.Set ^ Param.Unset) {
 
   /** @typedef */
   var Setup = (function() {
-    var HKCU = 0x80000001;
     var VERB_KEY = 'SOFTWARE\\Classes\\SystemFileAssociations\\.md\\shell\\cthtml';
-    var ICON_VALUENAME = 'Icon';
+    var KEY_FORMAT = 'HKCU\\{0}\\';
+    var VERBICON_VALUENAME;
 
     return {
       /** Configure the shortcut menu in the registry. */
       Set: function () {
-        var COMMAND_KEY = VERB_KEY + '\\command';
+        VERB_KEY = format(KEY_FORMAT, VERB_KEY);
+        var COMMAND_KEY = VERB_KEY + 'command\\';
         var command = format('{0} "{1}" /Markdown:"%1"', WSH.FullName.replace(/\\cscript\.exe$/i, '\\wscript.exe'), WSH.ScriptFullName);
-        StdRegProv.CreateKey(HKCU, COMMAND_KEY);
-        StdRegProv.SetStringValue(HKCU, COMMAND_KEY, null, command);
-        StdRegProv.SetStringValue(HKCU, VERB_KEY, null, 'Convert to &HTML');
+        WshShell.RegWrite(COMMAND_KEY, command);
+        WshShell.RegWrite(VERB_KEY, 'Convert to &HTML');
+        VERBICON_VALUENAME = VERB_KEY + '\\Icon';
       },
 
       /**
@@ -133,21 +67,25 @@ if (Param.Set ^ Param.Unset) {
        * @param {string} menuIconPath is the shortcut menu icon file path.
        */
       AddIcon: function (menuIconPath) {
-        StdRegProv.SetStringValue(HKCU, VERB_KEY, ICON_VALUENAME, menuIconPath);
+        WshShell.RegWrite(VERBICON_VALUENAME, menuIconPath);
       },
 
       /** Remove the shortcut icon menu. */
       RemoveIcon: function () {
-        StdRegProv.DeleteValue(HKCU, VERB_KEY, ICON_VALUENAME);
+        try {
+          WshShell.RegDelete(VERBICON_VALUENAME);
+        } catch (e) { }
       },
 
       /** Remove the shortcut menu by removing the verb key and subkeys. */
       Unset: function () {
+        /** @typedef */
+        var StdRegProv = GetObject('winmgmts:StdRegProv');
         var stdRegProvMethods = StdRegProv.Methods_;
         var enumKeyMethod = stdRegProvMethods('EnumKey');
         var enumKeyMethodParams = enumKeyMethod.InParameters;
         var inParams = enumKeyMethodParams.SpawnInstance_();
-        inParams.hDefKey = HKCU;
+        inParams.hDefKey = 0x80000001; // HKCU
         // Recursion is used because a key with subkeys cannot be deleted.
         // Recursion helps removing the leaf keys first.
         (function(key) {
@@ -161,12 +99,15 @@ if (Param.Set ^ Param.Unset) {
               arguments.callee(format('{0}\\{1}', key, sNamesArray[index]));
             }
           }
-          StdRegProv.DeleteKey(HKCU, key);
+          try {
+            WshShell.RegDelete(format(KEY_FORMAT, key));
+          } catch (e) { }
         })(VERB_KEY);
         inParams = null;
         enumKeyMethodParams = null;
         enumKeyMethod = null;
         stdRegProvMethods = null;
+        StdRegProv = null;
       }
     }
   })();
@@ -196,6 +137,20 @@ quit(1);
 // Utility functions.
 
 /**
+ * Generate a random file path.
+ * @param {string} extension is the file extension.
+ * @returns {string} a random file path.
+ */
+function generateRandomPath(extension) {
+  var typeLib = new ActiveXObject('Scriptlet.TypeLib');
+  try {
+    return FileSystemObject.BuildPath(WshShell.ExpandEnvironmentStrings('%TEMP%'), typeLib.Guid.substr(1, 36).toLowerCase() + '.tmp' + extension);
+  } finally {
+    typeLib = null;
+  }
+}
+
+/**
  * Delete the specified file.
  * @param {string} filePath is the file path.
  */
@@ -218,7 +173,20 @@ function popup(messageText, popupType, popupButtons) {
   if (!popupButtons) {
     popupButtons = BUTTONS_OKONLY;
   }
-  Shell32.ShellExecute(Package.MessageBoxLinkPath, format('""""{0}"""" {1} {2}', messageText.replace(/"/g, "'"), popupButtons, popupType), null, 'open', WINDOW_STYLE_HIDDEN);
+  run(format('"{0}" """"{1}"""" {2} {3}', Package.MessageBoxLinkPath, messageText.replace(/"/g, "'"), popupButtons, popupType));
+}
+
+/**
+ * Run a command.
+ * @param {string} commandLine
+ * @returns {number} the exit status.
+ */
+function run(commandLine) {
+  /** @constant */
+  var WINDOW_STYLE_HIDDEN = 0;
+  /** @constant */
+  var WAIT_ON_RETURN = true;
+  return WshShell.Run(commandLine, WINDOW_STYLE_HIDDEN, WAIT_ON_RETURN);
 }
 
 /**
@@ -237,8 +205,6 @@ function format(formatStr, args) {
 
 /** Destroy the COM objects. */
 function dispose() {
-  StdRegProv = null;
-  Shell32 = null;
   WshShell = null;
   FileSystemObject = null;
 }
@@ -260,37 +226,23 @@ function quit(exitCode) {
 /** Get the package type. */
 function getPackage() {
   /** @constant */
-  var POWERSHELL_SUBKEY = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe';
+  var POWERSHELL_SUBKEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe\\';
   /** The project resources directory path. */
   var resourcePath = FileSystemObject.BuildPath(ScriptRoot, 'rsc');
 
   /** The powershell core runtime path. */
-  var pwshExePath = (function() {
-    var stdRegProvMethods = StdRegProv.Methods_;
-    var getStringValueMethod = stdRegProvMethods('GetStringValue');
-    var getStringValueMethodParams = getStringValueMethod.InParameters;
-    var inParams = getStringValueMethodParams.SpawnInstance_();
-    inParams.sSubKeyName = POWERSHELL_SUBKEY;
-    var outParams = StdRegProv.ExecMethod_(getStringValueMethod.Name, inParams);
-    try {
-      return outParams.sValue;
-    } finally {
-      outParams = null;
-      inParams = null;
-      getStringValueMethodParams = null;
-      getStringValueMethod = null;
-      stdRegProvMethods = null;
-    }
-  })();
+  var pwshExePath = WshShell.RegRead(POWERSHELL_SUBKEY);
   /** The shortcut target powershell script path. */
   var pwshScriptPath = FileSystemObject.BuildPath(resourcePath, 'cvmd2html.ps1');
   var msgBoxLinkPath = FileSystemObject.BuildPath(ScriptRoot, 'MsgBox.lnk');
   var menuIconPath = FileSystemObject.BuildPath(resourcePath, 'menu.ico');
 
-  /** The icon link parent directory name. */
-  var iconLinkDirName = WshShell.SpecialFolders('StartMenu');
-  /** The icon link name. */
-  var iconLinkName = 'cvmd2html.lnk';
+  /**
+   * Store the partial "arguments" property string of the custom icon link.
+   * The command is partial because it does not include the markdown file path string.
+   * The markdown file path string will be input when calling the shortcut link.
+   */
+  var iconLinkArguments = format('-ep Bypass -nop -w Hidden -f "{0}" -Markdown', pwshScriptPath);
 
   return {
     /** The shortcut menu icon path. */
@@ -301,23 +253,16 @@ function getPackage() {
     /** Represents an adapted link object. */
     IconLink: {
       /** The icon link path. */
-      Path: FileSystemObject.BuildPath(iconLinkDirName, iconLinkName),
+      Path: FileSystemObject.BuildPath(WshShell.SpecialFolders('StartMenu'), 'cvmd2html.lnk'),
 
       /** Create the custom icon link file. */
       Create: function () {
-        var txtFile = FileSystemObject.CreateTextFile(this.Path);
-        txtFile.Close();
-        txtFile = null;
-        var folderItem = Shell32.NameSpace(iconLinkDirName);
-        var fileItem = folderItem.ParseName(iconLinkName);
-        var link = fileItem.GetLink;
-        link.Path = pwshExePath;
-        link.Arguments = format('-ep Bypass -nop -w Hidden -f "{0}" -Markdown', pwshScriptPath);
-        link.SetIconLocation(menuIconPath, 0);
+        var link = WshShell.CreateShortcut(this.Path);
+        link.TargetPath = pwshExePath;
+        link.Arguments = iconLinkArguments;
+        link.IconLocation = menuIconPath;
         link.Save();
         link = null;
-        fileItem = null;
-        folderItem = null;
       },
 
       /** Delete the custom icon link file. */
@@ -330,26 +275,12 @@ function getPackage() {
        * @returns {boolean} true if the link properties are as expected, false otherwise.
        */
       IsValid: function () {
-        var linkItem;
-        /** @typedef */
-        var Win32_ShortcutFile = GetObject('winmgmts:Win32_ShortcutFile');
-        var allShorcutFiles = Win32_ShortcutFile.Instances_();
-        var linkEnumerator = new Enumerator(allShorcutFiles);
-        var minPwshExePath = pwshExePath.toLowerCase();
-        var minIconLinkPath = this.Path.toLowerCase();
+        var linkItem = WshShell.CreateShortcut(this.Path);
+        var targetCommand = '{0} {1}';
         try {
-          while (!linkEnumerator.atEnd()) {
-            if ((linkItem = linkEnumerator.item()).Name.toLowerCase() == minIconLinkPath) {
-              return linkItem.Target.toLowerCase() == minPwshExePath;
-            }
-            linkEnumerator.moveNext()
-          }
-          return false;
+          return format(targetCommand, linkItem.TargetPath, linkItem.Arguments).toLowerCase() == format(targetCommand, pwshExePath, iconLinkArguments).toLowerCase();
         } finally {
           linkItem = null;
-          linkEnumerator = null;
-          allShorcutFiles = null;
-          Win32_ShortcutFile = null;
         }
       }
     }
