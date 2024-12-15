@@ -1,6 +1,6 @@
 /**
  * @file Launches the shortcut target PowerShell script with the selected markdown as an argument.
- * @version 0.0.1.69
+ * @version 0.0.1.106
  */
 
 // #region: header of utils.js
@@ -32,10 +32,47 @@ var Param = getParameters();
 
 /** The application execution. */
 if (Param.Markdown && Package.IconLink.IsValid()) {
+  // #region: errorLog.js
+  // Manage the error log file and content.
+
+  /** @typedef */
+  var ErrorLog = {
+    /** The error log file path. */
+    Path: generateRandomPath('.log'),
+
+    /** Display the content of the error log file in a message box if it is not empty. */
+    Read: function () {
+      /** @constant */
+      var FOR_READING = 1;
+      try {
+        var txtStream = FileSystemObject.OpenTextFile(this.Path, FOR_READING);
+        // Read the error message and remove the ANSI escaped character for red coloring.
+        var errorMessage = txtStream.ReadAll().replace(/(\x1B\[31;1m)|(\x1B\[0m)/g, '');
+        if (errorMessage.length) {
+          popup(errorMessage, POPUP_ERROR);
+        }
+      } catch (e) { }
+      if (txtStream) {
+        txtStream.Close();
+        txtStream = null;
+      }
+    },
+
+    /** Delete the error log file. */
+    Delete: function () {
+      deleteFile(this.Path)
+    }
+  }
+
+  // #endregion
+
   /** @constant */
-  var CMD_LINE_FORMAT = '"{0}" "{1}"';
-  if (run(format(CMD_LINE_FORMAT, Package.IconLink.Path, Param.Markdown))) {
-    popup('An unhandled error has occurred.', POPUP_ERROR);
+  var CMD_LINE_FORMAT = 'C:\\Windows\\System32\\cmd.exe /d /c ""{0}" "{1}" 2> "{2}""';
+  if (run(format(CMD_LINE_FORMAT, Package.IconLink.Path, Param.Markdown, ErrorLog.Path))) {
+    with (ErrorLog) {
+      Read();
+      Delete();
+    }
   }
   quit(0);
 }
